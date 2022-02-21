@@ -2,6 +2,7 @@
 
 import sys
 import types
+from warnings import warn
 
 # In the case of a pyodide context (JupyterLite)
 # we mock Tornado, as it cannot be imported and would
@@ -51,8 +52,10 @@ from traitlets import (
     Float,
     Instance,
     List,
+    Tuple,
     Unicode,
     default,
+    observe,
 )
 
 from ._version import js_semver
@@ -98,15 +101,19 @@ class Toolbar(DOMWidget, NavigationToolbar2WebAgg):
     _view_name = Unicode('ToolbarView').tag(sync=True)
 
     toolitems = List().tag(sync=True)
-    orientation = Enum(['horizontal', 'vertical'], default_value='vertical').tag(
-        sync=True
-    )
     button_style = CaselessStrEnum(
         values=['primary', 'success', 'info', 'warning', 'danger', ''],
         default_value='',
         help="""Use a predefined styling for the button.""",
     ).tag(sync=True)
+
+    #######
+    # Those traits are deprecated
+    orientation = Enum(['horizontal', 'vertical'], default_value='vertical').tag(
+        sync=True
+    )
     collapsed = Bool(True).tag(sync=True)
+    #######
 
     _current_action = Enum(values=['pan', 'zoom', ''], default_value='').tag(sync=True)
 
@@ -152,6 +159,23 @@ class Toolbar(DOMWidget, NavigationToolbar2WebAgg):
             if icon_name in icons
         ]
 
+    def __getattr__(self, name):
+        if name in ['orientation', 'collapsed']:
+            warn(
+                "The Toolbar properties 'orientation' and 'collapsed' are deprecated."
+                "Accessing them will raise an error in a coming ipympl release",
+                DeprecationWarning,
+            )
+
+        return super().__getattr__(name)
+
+    @observe('orientation', 'collapsed')
+    def _on_orientation_collapsed_changed(self, change):
+        warn(
+            "The Toolbar properties 'orientation' and 'collapsed' are deprecated.",
+            DeprecationWarning,
+        )
+
 
 class Canvas(DOMWidget, FigureCanvasWebAggCore):
 
@@ -164,7 +188,10 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
     _view_name = Unicode('MPLCanvasView').tag(sync=True)
 
     toolbar = Instance(Toolbar, allow_none=True).tag(sync=True, **widget_serialization)
-    toolbar_visible = Bool(True).tag(sync=True)
+    toolbar_visible = Enum(
+        ['visible', 'hidden', 'fade-in-fade-out', True, False],
+        default_value='fade-in-fade-out',
+    ).tag(sync=True)
     toolbar_position = Enum(
         ['top', 'bottom', 'left', 'right'], default_value='left'
     ).tag(sync=True)
@@ -184,8 +211,7 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
     # This will still be used by ipywidgets in the case of embedding.
     _data_url = Any(None).tag(sync=True)
 
-    _width = CInt().tag(sync=True)
-    _height = CInt().tag(sync=True)
+    _size = Tuple([0, 0]).tag(sync=True)
 
     _figure_label = Unicode('Figure').tag(sync=True)
     _message = Unicode().tag(sync=True)
@@ -265,9 +291,11 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
             self._figure_label = content['label']
 
         elif content['type'] == 'resize':
-            self._width = content['size'][0]
-            self._height = content['size'][1]
-            # Send resize message anyway
+            self._size = content['size']
+            # Send resize message anyway:
+            # We absolutely need this instead of a `_size` trait change listening
+            # on the front-end, otherwise ipywidgets might squash multiple changes
+            # and the resizing protocol is not respected anymore
             self.send({'data': json.dumps(content)})
 
         elif content['type'] == 'image_mode':
@@ -306,28 +334,36 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
 
         buf = io.BytesIO()
         self.figure.savefig(buf, format='png', dpi='figure')
-        self._data_url = b64encode(buf.getvalue()).decode('utf-8')
-        # Figure width in pixels
+
+        base64_image = b64encode(buf.getvalue()).decode('utf-8')
+        self._data_url = f'data:image/png;base64,{base64_image}'
+        # Figure size in pixels
         pwidth = self.figure.get_figwidth() * self.figure.get_dpi()
+        pheight = self.figure.get_figheight() * self.figure.get_dpi()
         # Scale size to match widget on HiDPI monitors.
         if hasattr(self, 'device_pixel_ratio'):  # Matplotlib 3.5+
             width = pwidth / self.device_pixel_ratio
+            height = pheight / self.device_pixel_ratio
         else:
             width = pwidth / self._dpi_ratio
+            height = pheight / self._dpi_ratio
         html = """
             <div style="display: inline-block;">
                 <div class="jupyter-widgets widget-label" style="text-align: center;">
                     {}
                 </div>
-                <img src='data:image/png;base64,{}' width={}/>
+                <img src='{}' width={}/>
             </div>
         """.format(
             self._figure_label, self._data_url, width
         )
 
+        # Update the widget model properly for HTML embedding
+        self._size = (width, height)
+
         data = {
             'text/plain': plaintext,
-            'image/png': self._data_url,
+            'image/png': base64_image,
             'text/html': html,
             'application/vnd.jupyter.widget-view+json': {
                 'version_major': 2,
@@ -416,11 +452,13 @@ class Canvas(DOMWidget, FigureCanvasWebAggCore):
 
 
 class FigureManager(FigureManagerWebAgg):
-    ToolbarCls = Toolbar
+    if matplotlib.__version__ < "3.6":
+        ToolbarCls = Toolbar
 
     def __init__(self, canvas, num):
         FigureManagerWebAgg.__init__(self, canvas, num)
         self.web_sockets = [self.canvas]
+        self.toolbar = Toolbar(self.canvas)
 
     def show(self):
         if self.canvas._closed:

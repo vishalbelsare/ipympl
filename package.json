@@ -1,6 +1,6 @@
 {
     "name": "jupyter-matplotlib",
-    "version": "0.10.2",
+    "version": "0.10.5",
     "description": "Matplotlib Jupyter Interactive Widget",
     "author": "Matplotlib Development team",
     "license": "BSD-3-Clause",
@@ -9,7 +9,7 @@
     "files": [
         "lib/**/*.js",
         "dist/*.js",
-        "src/**/*.css"
+        "css/*.css"
     ],
     "repository": {
         "type": "git",
